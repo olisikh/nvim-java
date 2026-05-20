@@ -21,6 +21,7 @@ local V = jdtls_version_map[JDTLS_VERSION]
 
 ---@class java.Config
 ---@field checks { nvim_version: boolean, nvim_jdtls_conflict: boolean }
+---@field experimental { fix_generated_sources: boolean }
 ---@field jdtls { version: string, path: string|nil, auto_install: boolean }
 ---@field lombok { enable: boolean, version: string, path: string|nil, auto_install: boolean }
 ---@field java_test { enable: boolean, version: string, path: string|nil, auto_install: boolean }
@@ -31,6 +32,7 @@ local V = jdtls_version_map[JDTLS_VERSION]
 
 ---@class java.PartialConfig
 ---@field checks? { nvim_version?: boolean, nvim_jdtls_conflict?: boolean }
+---@field experimental? { fix_generated_sources?: boolean }
 ---@field jdtls? { version?: string, path?: string, auto_install?: boolean }
 ---@field lombok? { enable?: boolean, version?: string, path?: string, auto_install?: boolean }
 ---@field java_test? { enable?: boolean, version?: string, path?: string, auto_install?: boolean }
@@ -44,6 +46,10 @@ local config = {
 	checks = {
 		nvim_version = true,
 		nvim_jdtls_conflict = true,
+	},
+
+	experimental = {
+		fix_generated_sources = false,
 	},
 
 	jdtls = {

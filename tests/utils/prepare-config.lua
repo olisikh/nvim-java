@@ -31,6 +31,10 @@ require('lazy').setup({
 		'nvim-java/nvim-java',
 		dir = '.',
 		config = function()
+			if vim.env.NVIM_JAVA_SKIP_SETUP == '1' then
+				return
+			end
+
 			local is_nixos = vim.fn.filereadable('/etc/NIXOS') == 1
 			local is_ci = vim.env.CI ~= nil
 

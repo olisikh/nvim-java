@@ -84,6 +84,108 @@ describe('Generated sources classpath patcher', function()
 		assert.is_falsy(content:find('target/generated-sources/src/main/java', 1, true))
 	end)
 
+	it('adds a marked Maven source-root declaration when the parent entry is missing', function()
+		vim.fn.writefile({
+			'<project>',
+			'    <build>',
+			'        <plugins>',
+			'            <plugin>',
+			'            </plugin>',
+			'        </plugins>',
+			'    </build>',
+			'</project>',
+		}, path.join(module_root, 'pom.xml'))
+		write_classpath({
+			'<?xml version="1.0" encoding="UTF-8"?>',
+			'<classpath>',
+			'\t<classpathentry kind="output" path="target/classes"/>',
+			'</classpath>',
+		})
+
+		assert.is_true(classpath.patch(temp_dir))
+
+		local pom_lines = vim.fn.readfile(path.join(module_root, 'pom.xml'))
+		local pom = table.concat(pom_lines, '\n')
+		assert.is_true(vim.tbl_contains(pom_lines, '            <!-- nvim-java: generated sources -->'))
+		for index, line in ipairs(pom_lines) do
+			if line == '            <!-- nvim-java: generated sources -->' then
+				assert.equals('', pom_lines[index - 1])
+				break
+			end
+		end
+		assert.is_true(vim.tbl_contains(pom_lines, '            <plugin>'))
+		assert.is_true(vim.tbl_contains(pom_lines, '                <groupId>org.codehaus.mojo</groupId>'))
+		assert.is_true(vim.tbl_contains(pom_lines, '                                <source>${project.basedir}/target/generated-sources/src/main/java</source>'))
+		assert.is_true(vim.tbl_contains(pom_lines, '        </plugins>'))
+		assert.is_falsy(pom:find('$1', 1, true))
+		assert.is_false(classpath.patch(temp_dir))
+	end)
+
+	it('creates plugins in an existing build block', function()
+		vim.fn.writefile({
+			'<project>',
+			'    <build>',
+			'    </build>',
+			'</project>',
+		}, path.join(module_root, 'pom.xml'))
+		write_classpath({
+			'<?xml version="1.0" encoding="UTF-8"?>',
+			'<classpath>',
+			'\t<classpathentry kind="output" path="target/classes"/>',
+			'</classpath>',
+		})
+
+		assert.is_true(classpath.patch(temp_dir))
+
+		local pom = table.concat(vim.fn.readfile(path.join(module_root, 'pom.xml')), '\n')
+		assert.is_truthy(pom:find('        <plugins>', 1, true))
+		assert.is_truthy(pom:find('            <plugin>', 1, true))
+		assert.is_truthy(pom:find('        </plugins>', 1, true))
+	end)
+
+	it('matches tab indentation used by existing plugin entries', function()
+		vim.fn.writefile({
+			'<project>',
+			'\t<build>',
+			'\t\t<plugins>',
+			'\t\t\t<plugin>',
+			'\t\t\t</plugin>',
+			'\t\t</plugins>',
+			'\t</build>',
+			'</project>',
+		}, path.join(module_root, 'pom.xml'))
+		write_classpath({
+			'<?xml version="1.0" encoding="UTF-8"?>',
+			'<classpath>',
+			'\t<classpathentry kind="output" path="target/classes"/>',
+			'</classpath>',
+		})
+
+		assert.is_true(classpath.patch(temp_dir))
+
+		local pom_lines = vim.fn.readfile(path.join(module_root, 'pom.xml'))
+		assert.is_true(vim.tbl_contains(pom_lines, '\t\t\t<!-- nvim-java: generated sources -->'))
+		assert.is_true(vim.tbl_contains(pom_lines, '\t\t\t<plugin>'))
+		assert.is_true(vim.tbl_contains(pom_lines, '\t\t\t\t<groupId>org.codehaus.mojo</groupId>'))
+	end)
+
+	it('creates build and plugins blocks when missing', function()
+		vim.fn.writefile({ '<project>', '</project>' }, path.join(module_root, 'pom.xml'))
+		write_classpath({
+			'<?xml version="1.0" encoding="UTF-8"?>',
+			'<classpath>',
+			'\t<classpathentry kind="output" path="target/classes"/>',
+			'</classpath>',
+		})
+
+		assert.is_true(classpath.patch(temp_dir))
+
+		local pom = table.concat(vim.fn.readfile(path.join(module_root, 'pom.xml')), '\n')
+		assert.is_truthy(pom:find('    <build>', 1, true))
+		assert.is_truthy(pom:find('        <plugins>', 1, true))
+		assert.is_truthy(pom:find('            <plugin>', 1, true))
+	end)
+
 	it('is idempotent — second call returns false and leaves file unchanged', function()
 		assert.is_true(classpath.patch(temp_dir))
 		local after_first = read_classpath()

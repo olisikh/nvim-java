@@ -3,6 +3,8 @@ local log = require('java-core.utils.log2')
 
 local M = {}
 
+local POM_MARKER = '<!-- nvim-java: generated sources -->'
+
 ---Normalize path separators to `/` for .classpath operations.
 ---Eclipse .classpath files always use `/` regardless of OS.
 ---@param p string
@@ -155,6 +157,153 @@ local function get_generated_source_roots(module_root)
 	return source_roots
 end
 
+---Add generated source roots to Maven when a generator does not expose them
+---to m2e/JDTLS. JDTLS recreates the Eclipse classpath during Maven import, so
+---this must be expressed in pom.xml rather than only patched in .classpath.
+---@param module_root string
+---@param source_roots string[]
+---@return boolean changed
+local function add_maven_source_roots(module_root, source_roots)
+	if #source_roots == 0 then
+		return false
+	end
+
+	local pom_file = path_utils.join(module_root, 'pom.xml')
+	if not vim.uv.fs_stat(pom_file) then
+		return false
+	end
+
+	local pom_lines = vim.fn.readfile(pom_file)
+	local pom = table.concat(pom_lines, '\n')
+	if pom:find(POM_MARKER, 1, true) then
+		return false
+	end
+
+	---@param lines string[]
+	---@param line_index integer
+	---@param new_lines string[]
+	local function insert_lines(lines, line_index, new_lines)
+		for index = #new_lines, 1, -1 do
+			table.insert(lines, line_index, new_lines[index])
+		end
+	end
+
+	---@param lines string[]
+	---@param closing_index integer
+	---@param parent_indent string
+	---@return string
+	local function get_indent_unit(lines, closing_index, parent_indent)
+		for index = closing_index - 1, 1, -1 do
+			local child_indent = lines[index]:match('^(%s*)<plugin>')
+			if child_indent and child_indent:sub(1, #parent_indent) == parent_indent then
+				local unit = child_indent:sub(#parent_indent + 1)
+				if unit ~= '' then
+					return unit
+				end
+			end
+		end
+
+		if parent_indent:find('\t', 1, true) then
+			return '\t'
+		end
+		return '    '
+	end
+
+	---@param plugin_indent string
+	---@param indent_unit string
+	---@return string[]
+	local function make_plugin(plugin_indent, indent_unit)
+		local plugin_field_indent = plugin_indent .. indent_unit
+		local execution_indent = plugin_field_indent .. indent_unit
+		local execution_field_indent = execution_indent .. indent_unit
+		local source_indent = execution_field_indent .. indent_unit
+		local source_value_indent = source_indent .. indent_unit
+
+		local lines = {
+			'',
+			plugin_indent .. POM_MARKER,
+			plugin_indent .. '<plugin>',
+			plugin_field_indent .. '<groupId>org.codehaus.mojo</groupId>',
+			plugin_field_indent .. '<artifactId>build-helper-maven-plugin</artifactId>',
+			plugin_field_indent .. '<version>3.6.0</version>',
+			plugin_field_indent .. '<executions>',
+			execution_indent .. '<execution>',
+			execution_field_indent .. '<id>nvim-java-generated-sources</id>',
+			execution_field_indent .. '<phase>generate-sources</phase>',
+			execution_field_indent .. '<goals>',
+			source_indent .. '<goal>add-source</goal>',
+			execution_field_indent .. '</goals>',
+			execution_field_indent .. '<configuration>',
+			source_indent .. '<sources>',
+		}
+
+		for _, source_root in ipairs(source_roots) do
+			table.insert(lines, source_value_indent .. '<source>${project.basedir}/' .. source_root .. '</source>')
+		end
+
+		vim.list_extend(lines, {
+			source_indent .. '</sources>',
+			execution_field_indent .. '</configuration>',
+			execution_indent .. '</execution>',
+			plugin_field_indent .. '</executions>',
+			plugin_indent .. '</plugin>',
+		})
+		return lines
+	end
+
+	local changed = false
+	for index, line in ipairs(pom_lines) do
+		local plugins_indent = line:match('^(%s*)</plugins>%s*$')
+		if plugins_indent then
+			local indent_unit = get_indent_unit(pom_lines, index, plugins_indent)
+			insert_lines(pom_lines, index, make_plugin(plugins_indent .. indent_unit, indent_unit))
+			changed = true
+			break
+		end
+	end
+
+	if not changed then
+		for index, line in ipairs(pom_lines) do
+			local build_indent = line:match('^(%s*)</build>%s*$')
+			if build_indent then
+				local indent_unit = get_indent_unit(pom_lines, index, build_indent)
+				local plugins_indent = build_indent .. indent_unit
+				local build_plugins = { plugins_indent .. '<plugins>' }
+				vim.list_extend(build_plugins, make_plugin(plugins_indent .. indent_unit, indent_unit))
+				table.insert(build_plugins, plugins_indent .. '</plugins>')
+				insert_lines(pom_lines, index, build_plugins)
+				changed = true
+				break
+			end
+		end
+	end
+
+	if not changed then
+		for index, line in ipairs(pom_lines) do
+			local project_indent = line:match('^(%s*)</project>%s*$')
+			if project_indent then
+				local indent_unit = '    '
+				local build_indent = project_indent .. indent_unit
+				local plugins_indent = build_indent .. indent_unit
+				local build = { build_indent .. '<build>', plugins_indent .. '<plugins>' }
+				vim.list_extend(build, make_plugin(plugins_indent .. indent_unit, indent_unit))
+				vim.list_extend(build, { plugins_indent .. '</plugins>', build_indent .. '</build>' })
+				insert_lines(pom_lines, index, build)
+				changed = true
+				break
+			end
+		end
+	end
+
+	if not changed then
+		return false
+	end
+
+	vim.fn.writefile(pom_lines, pom_file)
+	log.info('nvim-java: adding generated sources to Maven project', pom_file)
+	return true
+end
+
 ---Build exclusion list for the parent target/generated-sources entry.
 ---Always seeds `annotations/` — Eclipse/Maven convention excludes the
 ---annotations subdirectory from generated-sources to avoid processing
@@ -220,6 +369,22 @@ local function patch_module_classpath(classpath_file)
 	return file_changed
 end
 
+---Patch a Maven module whose Eclipse metadata has not yet been generated.
+---@param pom_file string
+---@return boolean changed
+local function patch_module_pom(pom_file)
+	local module_root = vim.fs.dirname(pom_file)
+	local classpath_file = path_utils.join(module_root, '.classpath')
+	if vim.uv.fs_stat(classpath_file) then
+		local lines = vim.fn.readfile(classpath_file)
+		if find_generated_sources_entry(lines) then
+			return false
+		end
+	end
+
+	return add_maven_source_roots(module_root, get_generated_source_roots(module_root))
+end
+
 ---Patch all .classpath files under `root` to include generated source roots.
 ---This is an experimental workaround for JDTLS import failures caused by
 ---nested generated sources under target/generated-sources.
@@ -236,6 +401,12 @@ function M.patch(root)
 			changed = true
 		end
 		count = count + 1
+	end
+
+	for _, file in ipairs(vim.fs.find('pom.xml', { path = root, type = 'file', limit = LIMIT })) do
+		if patch_module_pom(file) then
+			changed = true
+		end
 	end
 
 	if count >= LIMIT then
